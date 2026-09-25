@@ -13,3 +13,9 @@
 - `pose_landmarker_lite.task` / `pose_landmarker_full.task`
 - 配布元: https://storage.googleapis.com/mediapipe-models/
 - 利用条件はモデルカードを参照: https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker#models
+
+## MediaPipe Image Segmenter モデル（服の着せ替え）
+
+- `selfie_multiclass_256x256.tflite`
+- 配布元: https://storage.googleapis.com/mediapipe-models/
+- 利用条件はモデルカードを参照: https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter#models

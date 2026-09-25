@@ -2,6 +2,24 @@ import type { Lighting } from './shading';
 import type { MeshWarp } from './warp';
 
 const MAX_DOMES = 2;
+const MAX_HANDS = 2;
+
+/** 服の着せ替えの描画パラメータ（座標はアスペクト補正済み空間） */
+export interface ClothingRender {
+  /** 服らしさ 0〜255。前回から変わっていなければ null（テクスチャを使い回す） */
+  mask: Uint8Array | null;
+  maskWidth: number;
+  maskHeight: number;
+  /** clothing.ts の CLOTHING_MODES の番号（0 = OFF） */
+  mode: number;
+  color1: [number, number, number];
+  color2: [number, number, number];
+  reference: number;
+  /** 柄の原点と横軸（(-uy, ux) が下向き） */
+  frame: [number, number, number, number];
+  /** 柄の 1 周期の長さ */
+  unit: number;
+}
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -31,7 +49,101 @@ uniform vec4 u_domeB[${MAX_DOMES}]; // rx, 下側の ry, depth, 上側の伸び
 uniform vec3 u_light;
 uniform vec4 u_shade; // strength, sheen, shadowStep, shadowSoftness
 uniform float u_eps;
+uniform int u_handCount;
+uniform vec4 u_hands[${MAX_HANDS}]; // x, y, inner, outer
+uniform vec2 u_handWeight;
+uniform sampler2D u_clothMask;  // 服らしさ（元の映像の座標）
+uniform int u_clothMode;        // 0 = OFF, 1 = 無地, 2〜 = 柄（clothing.ts の CLOTHING_MODES の順）
+uniform vec3 u_cloth1;          // メインの色（リニア）
+uniform vec3 u_cloth2;          // サブの色（リニア）
+uniform float u_clothRef;       // 服の平均の明るさ（リニア）
+uniform vec4 u_bodyFrame;       // 柄の原点 x, y と横軸 ux, uy（(-uy, ux) が下向き）
+uniform float u_patternUnit;    // 柄の 1 周期の長さ（アスペクト補正済み空間）
 out vec4 outColor;
+
+// ---- 服の着せ替え ----
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+// 周期 1 の縞。duty は縞の太さの割合。境目は画面上の 1 ピクセル程度でぼかす
+float stripe(float x, float duty) {
+  float d = abs(fract(x) - 0.5);
+  float w = fwidth(x);
+  return 1.0 - smoothstep(0.5 * duty - w, 0.5 * duty + w, d);
+}
+
+// 体に固定した座標（柄の周期単位）でのサブの色の割合
+float patternAmount(vec2 q) {
+  if (u_clothMode == 2) return stripe(q.y, 0.5);                           // ボーダー
+  if (u_clothMode == 3) return stripe(q.x * 1.5, 0.3);                     // ストライプ
+  if (u_clothMode == 4) return 1.0 - 0.5 * (stripe(q.x, 0.5) + stripe(q.y, 0.5)); // ギンガム（重なりが濃い）
+  if (u_clothMode == 5) {                                                   // ドット（段ごとに半周期ずらす）
+    vec2 g = q * 1.2;
+    g.x += 0.5 * mod(floor(g.y), 2.0);
+    float d = length(fract(g) - 0.5);
+    float w = fwidth(d);
+    return 1.0 - smoothstep(0.22 - w, 0.22 + w, d);
+  }
+  if (u_clothMode == 6) {                                                   // アーガイル（菱形と細い斜線）
+    vec2 r = vec2(q.x + q.y * 0.7, q.x - q.y * 0.7) * 0.5;
+    float diamond = mod(floor(r.x) + floor(r.y), 2.0) * 0.35;
+    float line = max(stripe(r.x + 0.5, 0.06), stripe(r.y + 0.5, 0.06));
+    return max(diamond, line);
+  }
+  if (u_clothMode == 7) {                                                   // 迷彩（ノイズを 3 段階に分ける）
+    vec2 g = q * 0.6;
+    float n = 0.6 * vnoise(g) + 0.3 * vnoise(g * 2.3 + 7.0) + 0.1 * vnoise(g * 5.1 + 3.0);
+    float w = fwidth(n);
+    return 0.5 * smoothstep(0.45 - w, 0.45 + w, n) + 0.5 * smoothstep(0.6 - w, 0.6 + w, n);
+  }
+  return 0.0;                                                               // 無地
+}
+
+vec3 toLinear(vec3 c) {
+  return pow(c, vec3(2.2));
+}
+
+vec3 toSrgb(vec3 c) {
+  return pow(max(c, 0.0), vec3(1.0 / 2.2));
+}
+
+// 服の部分に色や柄を載せる。元の服の明るさを平均との比で残し、しわ・縫い目・プリントの濃淡を保つ
+vec3 dressUp(vec3 c) {
+  if (u_clothMode == 0) return c;
+  // 推定した服の境目はやや内側に寄っていて、元の服の色が縁に細く残るので、少し外側まで塗る
+  float m = smoothstep(0.12, 0.45, texture(u_clothMask, v_uv).r);
+  if (m <= 0.0) return c;
+  vec3 lin = toLinear(c);
+  float lum = dot(lin, vec3(0.2126, 0.7152, 0.0722));
+  // 暗い服のノイズを増幅しすぎないよう、小さな値を足してから比を取り、少し圧縮する
+  float shade = clamp(pow((lum + 0.02) / (u_clothRef + 0.02), 0.8), 0.0, 2.5);
+  vec2 s = vec2(v_uv.x * u_aspect, v_uv.y) - u_bodyFrame.xy;
+  vec2 q = vec2(dot(s, u_bodyFrame.zw), dot(s, vec2(-u_bodyFrame.w, u_bodyFrame.z))) / u_patternUnit;
+  vec3 target = mix(u_cloth1, u_cloth2, patternAmount(q));
+  return mix(c, toSrgb(target * shade), m);
+}
+
+// ---- 陰影 ----
+
+// 手は胸の手前にあるので陰影をつけない（手の部分は変形もしていない）
+float handMask(vec2 p) {
+  float m = 0.0;
+  for (int i = 0; i < ${MAX_HANDS}; i++) {
+    if (i >= u_handCount) break;
+    vec4 h = u_hands[i];
+    m = max(m, (1.0 - smoothstep(h.z, h.w, distance(p, h.xy))) * u_handWeight[i]);
+  }
+  return m;
+}
 
 // 光の回り込み。大きいほど陰影の境目が柔らかくなる
 const float WRAP = 0.4;
@@ -65,6 +177,8 @@ void main() {
     return;
   }
   vec4 c = texture(u_tex, v_uv);
+  // 柄は元の映像の座標で塗るので、そのあとのメッシュ変形で膨らみに沿って伸びる
+  c.rgb = dressUp(c.rgb);
   if (u_domeCount == 0) {
     outColor = c;
     return;
@@ -95,7 +209,8 @@ void main() {
 
   float shade = mix(1.0, diffuse, u_shade.x) * (1.0 - 0.5 * u_shade.x * occ);
   // ツヤは足し算で乗せる（黒い服でも丸みが見えるように）
-  outColor = vec4(c.rgb * shade + vec3(0.4 * u_shade.y * sheen), c.a);
+  vec3 lit = c.rgb * shade + vec3(0.4 * u_shade.y * sheen);
+  outColor = vec4(mix(lit, c.rgb, handMask(p)), c.a);
 }`;
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
@@ -128,11 +243,24 @@ export class Renderer {
     | 'domeB'
     | 'light'
     | 'shade'
-    | 'eps',
+    | 'eps'
+    | 'handCount'
+    | 'hands'
+    | 'handWeight'
+    | 'clothMask'
+    | 'clothMode'
+    | 'cloth1'
+    | 'cloth2'
+    | 'clothRef'
+    | 'bodyFrame'
+    | 'patternUnit',
     WebGLUniformLocation
   >;
+  private readonly maskTex: WebGLTexture;
   private readonly domeA = new Float32Array(MAX_DOMES * 4);
   private readonly domeB = new Float32Array(MAX_DOMES * 4);
+  private readonly hands = new Float32Array(MAX_HANDS * 4);
+  private readonly handWeight = new Float32Array(MAX_HANDS);
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -163,6 +291,16 @@ export class Renderer {
       light: loc('u_light'),
       shade: loc('u_shade'),
       eps: loc('u_eps'),
+      handCount: loc('u_handCount'),
+      hands: loc('u_hands'),
+      handWeight: loc('u_handWeight'),
+      clothMask: loc('u_clothMask'),
+      clothMode: loc('u_clothMode'),
+      cloth1: loc('u_cloth1'),
+      cloth2: loc('u_cloth2'),
+      clothRef: loc('u_clothRef'),
+      bodyFrame: loc('u_bodyFrame'),
+      patternUnit: loc('u_patternUnit'),
     };
 
     const vao = gl.createVertexArray();
@@ -201,6 +339,19 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.uniform1i(this.u.tex, 0);
 
+    // 服の領域（1 チャンネル）。最初は服なしの 1×1
+    this.maskTex = gl.createTexture()!;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.maskTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+    gl.uniform1i(this.u.clothMask, 1);
+    gl.activeTexture(gl.TEXTURE0);
+
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.clearColor(0, 0, 0, 1);
   }
@@ -211,7 +362,10 @@ export class Renderer {
     this.gl.viewport(0, 0, width, height);
   }
 
-  render(video: HTMLVideoElement, opts: { mirror: boolean; showMesh: boolean; lighting: Lighting | null }): void {
+  render(
+    video: HTMLVideoElement,
+    opts: { mirror: boolean; showMesh: boolean; lighting: Lighting | null; clothing: ClothingRender | null },
+  ): void {
     const { gl } = this;
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
@@ -220,7 +374,9 @@ export class Renderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(this.u.mirror, opts.mirror ? -1 : 1);
     gl.uniform1f(this.u.solid, 0);
+    gl.uniform1f(this.u.aspect, this.canvas.width / this.canvas.height);
     this.setLighting(opts.lighting);
+    this.setClothing(opts.clothing);
     gl.disable(gl.BLEND);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.triBuf);
     gl.drawElements(gl.TRIANGLES, this.triCount, gl.UNSIGNED_SHORT, 0);
@@ -234,6 +390,22 @@ export class Renderer {
     }
   }
 
+  private setClothing(c: ClothingRender | null): void {
+    const { gl, u } = this;
+    gl.uniform1i(u.clothMode, c ? c.mode : 0);
+    if (!c || c.mode === 0) return;
+    if (c.mask) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, c.maskWidth, c.maskHeight, 0, gl.RED, gl.UNSIGNED_BYTE, c.mask);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+    gl.uniform3fv(u.cloth1, c.color1);
+    gl.uniform3fv(u.cloth2, c.color2);
+    gl.uniform1f(u.clothRef, c.reference);
+    gl.uniform4fv(u.bodyFrame, c.frame);
+    gl.uniform1f(u.patternUnit, c.unit);
+  }
+
   private setLighting(l: Lighting | null): void {
     const { gl, u } = this;
     const domes = (l?.domes ?? []).filter((d) => d.depth > 0).slice(0, MAX_DOMES);
@@ -245,9 +417,18 @@ export class Renderer {
     });
     gl.uniform4fv(u.domeA, this.domeA);
     gl.uniform4fv(u.domeB, this.domeB);
-    gl.uniform1f(u.aspect, this.canvas.width / this.canvas.height);
     gl.uniform3fv(u.light, l.light);
     gl.uniform4f(u.shade, l.strength, l.sheen, l.shadowStep, l.shadowSoftness);
     gl.uniform1f(u.eps, 1.5 / this.canvas.height);
+
+    const hands = l.hands.slice(0, MAX_HANDS);
+    gl.uniform1i(u.handCount, hands.length);
+    this.handWeight.fill(0);
+    hands.forEach((h, i) => {
+      this.hands.set([h.x, h.y, h.inner, h.outer], i * 4);
+      this.handWeight[i] = h.weight;
+    });
+    gl.uniform4fv(u.hands, this.hands);
+    gl.uniform2fv(u.handWeight, this.handWeight);
   }
 }

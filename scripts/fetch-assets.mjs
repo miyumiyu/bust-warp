@@ -1,4 +1,4 @@
-// MediaPipe の WASM と姿勢推定モデルを public/ に配置する（npm install 後に自動実行）
+// MediaPipe の WASM と、姿勢推定・服の領域推定のモデルを public/ に配置する（npm install 後に自動実行）
 import { access, cp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -8,9 +8,18 @@ const wasmSrc = path.join(root, 'node_modules', '@mediapipe', 'tasks-vision', 'w
 const wasmDst = path.join(root, 'public', 'mediapipe', 'wasm');
 const modelDir = path.join(root, 'public', 'models');
 
-const MODELS = ['lite', 'full'];
-const modelUrl = (m) =>
-  `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${m}/float16/latest/pose_landmarker_${m}.task`;
+const MODEL_BASE = 'https://storage.googleapis.com/mediapipe-models';
+const MODELS = [
+  ...['lite', 'full'].map((m) => ({
+    file: `pose_landmarker_${m}.task`,
+    url: `${MODEL_BASE}/pose_landmarker/pose_landmarker_${m}/float16/latest/pose_landmarker_${m}.task`,
+  })),
+  // 背景・髪・肌（体）・肌（顔）・服・その他 の 6 クラスに分ける人物セグメンテーション
+  {
+    file: 'selfie_multiclass_256x256.tflite',
+    url: `${MODEL_BASE}/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite`,
+  },
+];
 
 const exists = (p) => access(p).then(() => true, () => false);
 
@@ -27,13 +36,13 @@ console.log(`[assets] wasm -> ${path.relative(root, wasmDst)}`);
 
 await mkdir(modelDir, { recursive: true });
 for (const m of MODELS) {
-  const dst = path.join(modelDir, `pose_landmarker_${m}.task`);
+  const dst = path.join(modelDir, m.file);
   if (await exists(dst)) {
-    console.log(`[assets] model ${m}: already present`);
+    console.log(`[assets] ${m.file}: already present`);
     continue;
   }
-  const res = await fetch(modelUrl(m));
-  if (!res.ok) throw new Error(`model ${m}: HTTP ${res.status}`);
+  const res = await fetch(m.url);
+  if (!res.ok) throw new Error(`${m.file}: HTTP ${res.status}`);
   await writeFile(dst, Buffer.from(await res.arrayBuffer()));
-  console.log(`[assets] model ${m} -> ${path.relative(root, dst)}`);
+  console.log(`[assets] ${m.file} -> ${path.relative(root, dst)}`);
 }

@@ -8,6 +8,17 @@ export interface Vec {
   y: number;
 }
 
+/** 手のひら（円で近似） */
+export interface HandState {
+  /** 0 = 本人の左手、1 = 右手 */
+  side: 0 | 1;
+  x: number;
+  y: number;
+  r: number;
+  vx: number;
+  vy: number;
+}
+
 /** フィルタ済みの体の状態 */
 export interface BodyState {
   /** 本人の左肩（ランドマーク 11、鏡像なしの映像では画面右側） */
@@ -16,6 +27,8 @@ export interface BodyState {
   rs: Vec;
   /** 体の左右の向き [rad]。正のとき本人の左肩が奥にある */
   yaw: number;
+  /** 見えている手 */
+  hands: HandState[];
 }
 
 export interface ChestParams {

@@ -2,6 +2,9 @@
 
 const SUBSTEP = 1 / 240;
 
+/** 外から加える加速度（手で押すなど）。位置と速度から毎サブステップ計算する */
+export type ExternalForce = (x: number, y: number, vx: number, vy: number) => [number, number];
+
 export class Spring2D {
   x = 0;
   y = 0;
@@ -26,7 +29,7 @@ export class Spring2D {
    * @param freq 固有振動数 [Hz]
    * @param zeta 減衰比（1 で振動しない、小さいほど長く揺れる）
    */
-  step(targetX: number, targetY: number, dt: number, freq: number, zeta: number): void {
+  step(targetX: number, targetY: number, dt: number, freq: number, zeta: number, external?: ExternalForce): void {
     if (!this.initialized) {
       this.reset(targetX, targetY);
       return;
@@ -44,8 +47,9 @@ export class Spring2D {
       const a = i / n;
       const gx = x0 + (targetX - x0) * a;
       const gy = y0 + (targetY - y0) * a;
-      this.vx += (k * (gx - this.x) - c * this.vx) * h;
-      this.vy += (k * (gy - this.y) - c * this.vy) * h;
+      const [ex, ey] = external ? external(this.x, this.y, this.vx, this.vy) : [0, 0];
+      this.vx += (k * (gx - this.x) - c * this.vx + ex) * h;
+      this.vy += (k * (gy - this.y) - c * this.vy + ey) * h;
       this.x += this.vx * h;
       this.y += this.vy * h;
     }

@@ -7,6 +7,7 @@
 //   - 膨らみ: 中心から放射状に押し広げる。半径方向の伸び率は 1 - 0.653·strength 以上。
 //            strength ≤ 1 なら外周の圧縮は 0.35 倍までに収まる
 //   - 揺れ:   膨らみより一回り広い領域を平行移動する。伸び率は 1 - 1.72·移動量 以上
+// 最後に手の円の中では変形を打ち消し、手が胸と一緒に歪まないようにする。
 
 export interface BreastShape {
   cx: number;
@@ -103,6 +104,85 @@ export function buildStages(shapes: BreastShape[], shiftScale = 1): Stage[] {
 /** 1フレームで揺れの抑制を戻す量（約 20 フレームで元に戻る） */
 const GUARD_RECOVERY = 0.05;
 
+/** 変形させない円（手）。weight は出入りのフェード（0〜1） */
+export interface Hole {
+  x: number;
+  y: number;
+  r: number;
+  weight: number;
+}
+
+/** 実際に使った手の円。inner の内側は変形 0、outer まで滑らかに戻す */
+export interface ResolvedHole {
+  x: number;
+  y: number;
+  inner: number;
+  outer: number;
+  weight: number;
+}
+
+/** 手の周りで変形を戻す幅の範囲（×手の半径） */
+const HOLE_FADE_MIN = 0.6;
+const HOLE_FADE_MAX = 3;
+/**
+ * 変形量 d を幅 w で 0 に戻すと、その幅の中で約 1.5·d / w だけ伸び縮みする。
+ * 手から離れる向きの変形は引き伸ばすだけだが、手に向かう変形は押し縮めて裏返りの原因になる。
+ * 押し縮めが 0.5 倍以内になるように、幅を「手に向かう変形量」の 3 倍以上にする
+ */
+const HOLE_FADE_PER_DISPLACEMENT = 3;
+/** 手の周りの変形量を調べる距離（×手の半径）と方向の数 */
+const HOLE_SAMPLE_RADII = [1, 1.5, 2, 3];
+const HOLE_SAMPLE_DIRS = 12;
+
+/** 裏返りを検出したときに順に試す設定（揺れの係数、手の周りの幅の係数） */
+const GUARD_STEPS = [
+  { shift: 0.5, soft: 1.6 },
+  { shift: 0, soft: 2.5 },
+  { shift: 0, soft: 4 },
+];
+
+function holeMask(holes: ResolvedHole[], x: number, y: number): number {
+  let m = 0;
+  for (const h of holes) {
+    const d = Math.hypot(x - h.x, y - h.y);
+    if (d >= h.outer) continue;
+    let t = d <= h.inner ? 1 : (h.outer - d) / (h.outer - h.inner);
+    t = t * t * (3 - 2 * t);
+    m = Math.max(m, t * h.weight);
+  }
+  return m;
+}
+
+/** ステージを合成し、手の円の中では変形を打ち消す */
+function mapPoint(stages: Stage[], holes: ResolvedHole[], x: number, y: number): void {
+  applyStages(stages, x, y);
+  if (holes.length === 0) return;
+  const k = 1 - holeMask(holes, x, y);
+  out.x = x + (out.x - x) * k;
+  out.y = y + (out.y - y) * k;
+}
+
+function resolveHoles(stages: Stage[], holes: Hole[], soft: number): ResolvedHole[] {
+  return holes
+    .filter((h) => h.weight > 0 && h.r > 0)
+    .map((h) => {
+      let inward = 0;
+      for (const rr of HOLE_SAMPLE_RADII) {
+        for (let i = 0; i < HOLE_SAMPLE_DIRS; i++) {
+          const a = (i / HOLE_SAMPLE_DIRS) * Math.PI * 2;
+          const nx = Math.cos(a);
+          const ny = Math.sin(a);
+          const x = h.x + nx * h.r * rr;
+          const y = h.y + ny * h.r * rr;
+          applyStages(stages, x, y);
+          inward = Math.max(inward, -((out.x - x) * nx + (out.y - y) * ny));
+        }
+      }
+      const fade = Math.min(Math.max(HOLE_FADE_PER_DISPLACEMENT * inward, HOLE_FADE_MIN * h.r), HOLE_FADE_MAX * h.r) * soft;
+      return { x: h.x, y: h.y, inner: h.r, outer: h.r + fade, weight: h.weight };
+    });
+}
+
 export class MeshWarp {
   readonly vertexCount: number;
   /** 元の位置（テクスチャ座標, 0..1） */
@@ -152,32 +232,44 @@ export class MeshWarp {
 
   /** 揺れの移動量に掛ける係数。三角形の裏返りを検出したら下げる */
   shiftScale = 1;
+  /** 手の周りで変形を戻す幅に掛ける係数。三角形の裏返りを検出したら広げる */
+  holeSoftness = 1;
+  /** 直前の update で使った手の円 */
+  holes: ResolvedHole[] = [];
   /** 変形がかかっている格子の範囲 [i0, i1) × [j0, j1) */
   private box = { i0: 0, i1: 0, j0: 0, j1: 0 };
   private stages: Stage[] = [];
 
   /** 直前の update と同じ変形を 1 点に適用する（アスペクト補正済み空間） */
   transform(x: number, y: number): { x: number; y: number } {
-    applyStages(this.stages, x, y);
+    mapPoint(this.stages, this.holes, x, y);
     return { x: out.x, y: out.y };
   }
 
-  update(shapes: BreastShape[], aspect: number): void {
-    // 各ステージは単体では裏返らないが、胸の間で圧縮が重なり、揺れが最大のときだけ
-    // 格子の分解能が足りず裏返ることがある。そのフレームは揺れを弱めて作り直す
-    let scale = Math.min(1, this.shiftScale + GUARD_RECOVERY);
+  /**
+   * @param holes 変形させない円（手）。手が胸と一緒に膨らんだり揺れたりしないようにする
+   */
+  update(shapes: BreastShape[], aspect: number, holes: Hole[] = []): void {
+    // 各ステージは単体では裏返らないが、胸の間で圧縮が重なったり、手の周りで変形を打ち消したり
+    // すると、格子の分解能が足りず裏返ることがある。そのフレームは揺れを弱め、手の周りの幅を
+    // 広げて作り直す
+    let shift = Math.min(1, this.shiftScale + GUARD_RECOVERY);
+    let soft = Math.max(1, this.holeSoftness - GUARD_RECOVERY * 2);
     for (let attempt = 0; ; attempt++) {
-      this.warp(buildStages(shapes, scale), aspect);
-      if (scale === 0 || !this.hasFlippedTriangle()) break;
-      scale = attempt < 2 ? scale * 0.5 : 0;
+      this.warp(buildStages(shapes, shift), aspect, holes, soft);
+      if (attempt >= GUARD_STEPS.length || !this.hasFlippedTriangle()) break;
+      shift = Math.min(shift, GUARD_STEPS[attempt].shift);
+      soft = Math.max(soft, GUARD_STEPS[attempt].soft);
     }
-    this.shiftScale = scale;
+    this.shiftScale = shift;
+    this.holeSoftness = soft;
   }
 
-  private warp(stages: Stage[], aspect: number): void {
+  private warp(stages: Stage[], aspect: number, holes: Hole[], soft: number): void {
     const { uv, pos, cols, rows } = this;
     pos.set(uv);
     this.stages = stages;
+    this.holes = stages.length ? resolveHoles(stages, holes, soft) : [];
     if (stages.length === 0) {
       this.box = { i0: 0, i1: 0, j0: 0, j1: 0 };
       return;
@@ -205,7 +297,7 @@ export class MeshWarp {
     for (let j = box.j0; j <= box.j1; j++) {
       for (let i = box.i0; i <= box.i1; i++) {
         const k = (j * (cols + 1) + i) * 2;
-        applyStages(stages, uv[k] * aspect, uv[k + 1]);
+        mapPoint(stages, this.holes, uv[k] * aspect, uv[k + 1]);
         pos[k] = out.x / aspect;
         pos[k + 1] = out.y;
       }

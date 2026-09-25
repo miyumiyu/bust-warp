@@ -2,6 +2,7 @@
 // 実際の陰影計算は renderer.ts のフラグメントシェーダで行う
 
 import type { ChestPose, Vec } from './chest';
+import type { ResolvedHole } from './warp';
 
 /** 高さ場の丸み 1 つ分（アスペクト補正済み空間、変形後の映像上の位置） */
 export interface Dome {
@@ -28,6 +29,8 @@ export interface Lighting {
   shadowStep: number;
   /** 落ち影の境界のぼかし幅 */
   shadowSoftness: number;
+  /** 陰影をつけない円（胸の手前にある手） */
+  hands: ResolvedHole[];
 }
 
 /** 光源のカメラ軸からの角度。大きいほど影が長く濃くなる */
@@ -40,6 +43,8 @@ const DOME_RADIUS_BASE = 0.65;
 const DOME_RADIUS_PER_STRENGTH = 0.2;
 /** 胸の上側はなだらかに胸元へつながるので、上側の縦半径を伸ばす */
 const UPPER_STRETCH = 1.6;
+/** 手の縁で陰影をぼかす幅（×手の半径） */
+const HAND_SHADE_FEATHER = 1.25;
 
 /**
  * @param angleDeg 表示上の光の向き（0 = 真上、正 = 画面右から）
@@ -73,6 +78,7 @@ export function makeDome(center: Vec, pose: ChestPose, strength: number, depth: 
 
 export function makeLighting(
   domes: Dome[],
+  hands: ResolvedHole[],
   p: { lightAngle: number; mirror: boolean; shadeStrength: number; sheen: number },
 ): Lighting {
   const radius = Math.max(...domes.map((d) => (d.rx + d.ry) / 2));
@@ -84,5 +90,7 @@ export function makeLighting(
     sheen: p.sheen,
     shadowStep: radius * 0.12,
     shadowSoftness: Math.max(depth * 0.15, 1e-5),
+    // 陰影を消すのは手そのものだけ（変形を戻す幅は折り返し防止のためなので広すぎる）
+    hands: hands.map((h) => ({ ...h, outer: h.inner * HAND_SHADE_FEATHER })),
   };
 }

@@ -1,5 +1,6 @@
 import { PoseLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision';
 import type { ChestPose, Vec } from './chest';
+import type { ResolvedHole } from './warp';
 
 export interface OverlayState {
   mirror: boolean;
@@ -10,6 +11,8 @@ export interface OverlayState {
   /** 揺れ（バネ）の現在位置 */
   springs: Vec[];
   presence: number;
+  /** 胸に触れる手（内側の円は変形しない、外側の円まで変形を戻す） */
+  hands: ResolvedHole[];
 }
 
 /** 骨格と胸の推定位置を映像の上に描く（デバッグ表示） */
@@ -99,6 +102,24 @@ export class Overlay {
       ctx.beginPath();
       ctx.arc(p.center.x * H, p.center.y * H, lw * 2, 0, Math.PI * 2);
       ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    if (s.showChest) {
+      for (const h of s.hands) {
+        ctx.globalAlpha = h.weight;
+        ctx.lineWidth = lw;
+        ctx.strokeStyle = 'rgba(80, 220, 255, 0.95)';
+        ctx.beginPath();
+        ctx.arc(h.x * H, h.y * H, h.inner * H, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([lw * 2, lw * 3]);
+        ctx.strokeStyle = 'rgba(80, 220, 255, 0.5)';
+        ctx.beginPath();
+        ctx.arc(h.x * H, h.y * H, h.outer * H, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
       ctx.globalAlpha = 1;
     }
   }

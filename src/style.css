@@ -144,6 +144,34 @@ body {
   accent-color: var(--accent);
 }
 
+.choice,
+.color {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.choice .name,
+.color .name {
+  flex: 1;
+}
+
+.choice select {
+  width: auto;
+  margin-top: 0;
+}
+
+.color input {
+  width: 44px;
+  height: 24px;
+  padding: 0 2px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #22252c;
+  cursor: pointer;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -196,6 +224,39 @@ button:hover {
 button.secondary {
   margin-top: 12px;
   color: var(--muted);
+}
+
+.note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.note:empty {
+  display: none;
+}
+
+/* OBS のブラウザソース用: 映像だけを画面いっぱいに出し、余白は透明にする */
+html.obs,
+html.obs body,
+html.obs .stage {
+  background: transparent;
+}
+
+html.obs .panel,
+html.obs .hud {
+  display: none;
+}
+
+html.obs .stage-wrap {
+  padding: 0;
+}
+
+html.obs .stage {
+  width: min(100vw, calc(100vh * (var(--ar))));
+  border-radius: 0;
 }
 
 .links {

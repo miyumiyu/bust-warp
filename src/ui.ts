@@ -1,3 +1,5 @@
+import type { CameraInfo } from './camera';
+import { CLOTHING_MODES, type ClothingMode } from './clothing';
 import { DEFAULTS, saveParams, type Params } from './params';
 
 type NumKey = { [K in keyof Params]: Params[K] extends number ? K : never }[keyof Params];
@@ -18,7 +20,19 @@ interface Toggle {
   hotkey?: string;
 }
 
-type Item = Slider | Toggle;
+interface Choice {
+  key: 'clothing';
+  label: string;
+  options: readonly { id: ClothingMode; label: string }[];
+}
+
+interface ColorPick {
+  key: 'clothColor' | 'clothColor2';
+  label: string;
+  color: true;
+}
+
+type Item = Slider | Toggle | Choice | ColorPick;
 
 const SECTIONS: { title: string; items: Item[] }[] = [
   {
@@ -41,6 +55,15 @@ const SECTIONS: { title: string; items: Item[] }[] = [
     ],
   },
   {
+    title: '服の着せ替え',
+    items: [
+      { key: 'clothing', label: '柄', options: CLOTHING_MODES },
+      { key: 'clothColor', label: 'メインの色', color: true },
+      { key: 'clothColor2', label: 'サブの色（柄）', color: true },
+      { key: 'patternScale', label: '柄の大きさ', min: 0.4, max: 2.5, step: 0.05 },
+    ],
+  },
+  {
     title: '位置・追従',
     items: [
       { key: 'drop', label: '肩からの距離（×肩幅）', min: 0.3, max: 1.1, step: 0.01 },
@@ -59,13 +82,21 @@ const SECTIONS: { title: string; items: Item[] }[] = [
     ],
   },
   {
+    title: '手で触る',
+    items: [
+      { key: 'touch', label: '手で触る', hotkey: 'h' },
+      { key: 'pushStrength', label: '押す強さ', min: 0, max: 2, step: 0.05 },
+      { key: 'handSize', label: '手の大きさ', min: 0.5, max: 2, step: 0.05 },
+    ],
+  },
+  {
     title: '表示',
     items: [
       { key: 'mirror', label: '鏡像' },
       { key: 'showSkeleton', label: '骨格', hotkey: 's' },
       { key: 'showChest', label: '胸の推定位置', hotkey: 'c' },
       { key: 'showMesh', label: 'メッシュ', hotkey: 'm' },
-      { key: 'mouseTest', label: 'マウスで操作テスト', hotkey: 't' },
+      { key: 'mouseTest', label: 'マウスで操作テスト（ドラッグで触る）', hotkey: 't' },
     ],
   },
 ];
@@ -74,6 +105,7 @@ export interface PanelActions {
   onChange(key: keyof Params): void;
   onPoke(): void;
   onCalibrate(): void;
+  getObsUrl(): string;
 }
 
 /** セクションの末尾に置くボタン（キーは KeyboardEvent.key の小文字） */
@@ -82,7 +114,13 @@ const BUTTONS: Record<string, { label: string; key: string; keyLabel: string; ac
   揺れ: { label: '揺らしてみる', key: ' ', keyLabel: 'Space', action: 'onPoke' },
 };
 
-export function buildPanel(root: HTMLElement, params: Params, actions: PanelActions): void {
+export interface Panel {
+  /** カメラの一覧と、今使っているカメラの名前を表示する */
+  setCameras(cams: CameraInfo[], active: string): void;
+  setVideoSize(width: number, height: number): void;
+}
+
+export function buildPanel(root: HTMLElement, params: Params, actions: PanelActions): Panel {
   const refreshers: (() => void)[] = [];
   const hotkeys = new Map<string, BoolKey>();
 
@@ -128,6 +166,37 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
         refreshers.push(refresh);
         row.append(name, value, input);
         sec.append(row);
+      } else if ('options' in item) {
+        const row = h('label', 'choice');
+        const select = document.createElement('select');
+        for (const o of item.options) {
+          const opt = document.createElement('option');
+          opt.value = o.id;
+          opt.textContent = o.label;
+          select.append(opt);
+        }
+        const refresh = () => (select.value = params[item.key]);
+        select.addEventListener('change', () => {
+          params[item.key] = select.value as ClothingMode;
+          commit(item.key);
+        });
+        refresh();
+        refreshers.push(refresh);
+        row.append(h('span', 'name', item.label), select);
+        sec.append(row);
+      } else if ('color' in item) {
+        const row = h('label', 'color');
+        const input = document.createElement('input');
+        input.type = 'color';
+        const refresh = () => (input.value = params[item.key]);
+        input.addEventListener('input', () => {
+          params[item.key] = input.value;
+          commit(item.key);
+        });
+        refresh();
+        refreshers.push(refresh);
+        row.append(h('span', 'name', item.label), input);
+        sec.append(row);
       } else {
         const row = h('label', 'toggle');
         const input = document.createElement('input');
@@ -159,6 +228,46 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
     root.append(sec);
   }
 
+  const camSec = h('section');
+  camSec.append(h('h2', undefined, 'カメラ・OBS 出力'));
+  const camSelect = document.createElement('select');
+  const camActive = h('p', 'note');
+  const fillCameras = (cams: CameraInfo[]) => {
+    const opts: [string, string][] = [['', '自動（仮想カメラ以外）']];
+    for (const c of cams) if (c.label) opts.push([c.label, c.virtual ? `${c.label}（仮想）` : c.label]);
+    if (params.camera && !opts.some(([v]) => v === params.camera)) opts.push([params.camera, `${params.camera}（見つかりません）`]);
+    camSelect.replaceChildren(
+      ...opts.map(([v, label]) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = label;
+        return o;
+      }),
+    );
+    camSelect.value = params.camera;
+  };
+  fillCameras([]);
+  camSelect.addEventListener('change', () => {
+    params.camera = camSelect.value;
+    commit('camera');
+  });
+  refreshers.push(() => (camSelect.value = params.camera));
+
+  const copy = h('button', undefined, 'OBS 用 URL をコピー') as HTMLButtonElement;
+  copy.addEventListener('click', async () => {
+    const url = actions.getObsUrl();
+    try {
+      await navigator.clipboard.writeText(url);
+      copy.textContent = 'コピーしました';
+      setTimeout(() => (copy.textContent = 'OBS 用 URL をコピー'), 2000);
+    } catch {
+      window.prompt('OBS のブラウザソースに貼り付ける URL', url);
+    }
+  });
+  const hint = h('p', 'note', 'OBS の「ブラウザ」ソースに貼り付けて使います。今の設定とカメラが URL に入ります。');
+  camSec.append(camSelect, camActive, copy, hint);
+  root.append(camSec);
+
   const modelSec = h('section');
   modelSec.append(h('h2', undefined, '姿勢推定モデル'));
   const select = document.createElement('select');
@@ -181,12 +290,12 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
 
   const reset = h('button', 'secondary', '設定を初期値に戻す');
   reset.addEventListener('click', () => {
-    const prevModel = params.model;
+    const prev = { ...params };
     Object.assign(params, DEFAULTS);
     for (const r of refreshers) r();
     saveParams(params);
     for (const key of Object.keys(DEFAULTS) as (keyof Params)[]) {
-      if (key !== 'model' || prevModel !== params.model) actions.onChange(key);
+      if (params[key] !== prev[key]) actions.onChange(key);
     }
   });
   modelSec.append(reset);
@@ -229,4 +338,14 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
     for (const r of refreshers) r();
     commit(key);
   });
+
+  return {
+    setCameras(cams, active) {
+      fillCameras(cams);
+      camActive.textContent = active ? `使用中: ${active}` : '';
+    },
+    setVideoSize(width, height) {
+      hint.textContent = `OBS の「ブラウザ」ソースに貼り付けて、幅 ${width}・高さ ${height} にします。今の設定とカメラが URL に入ります。`;
+    },
+  };
 }
