@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Webcam Bust Warp</title>
+    <meta name="description" content="Webカメラの映像で胸の部分を膨らませて揺らすブラウザアプリ。映像は端末内だけで処理されます。" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div class="app">
+      <main class="stage-wrap">
+        <div class="stage" id="stage">
+          <canvas id="gl"></canvas>
+          <canvas id="overlay"></canvas>
+          <div class="hud" id="hud"></div>
+          <div class="status" id="status" hidden></div>
+        </div>
+      </main>
+      <aside class="panel" id="panel"></aside>
+    </div>
+    <video id="video" playsinline muted></video>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
