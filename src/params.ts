@@ -1,4 +1,4 @@
-import { CLOTHING_MODES, type ClothingMode } from './clothing';
+import { CLOTHING_MODES, CLOTHING_TEXTURES, type ClothingMode, type ClothingTexture } from './clothing';
 
 export interface Params {
   // 膨らみ
@@ -31,6 +31,10 @@ export interface Params {
   clothColor: string;
   clothColor2: string;
   patternScale: number;
+  clothTexture: ClothingTexture;
+  textureStrength: number;
+  textureScale: number;
+  clothBrightness: number;
   // 表示
   effect: boolean;
   mirror: boolean;
@@ -67,6 +71,10 @@ export const DEFAULTS: Params = {
   clothColor: '#2f6fb3',
   clothColor2: '#f4f1ea',
   patternScale: 1,
+  clothTexture: 'none',
+  textureStrength: 0.35,
+  textureScale: 1,
+  clothBrightness: 1,
   effect: true,
   mirror: true,
   showSkeleton: true,
@@ -88,6 +96,12 @@ export const OBS_MODE = new URLSearchParams(location.search).has('obs');
 /** URL に入れない、確認用の表示設定 */
 const DEBUG_KEYS: (keyof Params)[] = ['showSkeleton', 'showChest', 'showMesh', 'mouseTest'];
 
+const MATERIAL_LIMITS = {
+  textureStrength: [0, 1],
+  textureScale: [0.4, 3],
+  clothBrightness: [0.25, 2],
+} as const;
+
 /** 既定値と同じ型の項目だけを取り込む（古い保存値や壊れた URL への備え） */
 function sanitize(raw: unknown): Partial<Params> {
   const out: Record<string, unknown> = {};
@@ -96,7 +110,14 @@ function sanitize(raw: unknown): Partial<Params> {
       if (!(k in DEFAULTS) || typeof v !== typeof DEFAULTS[k as keyof Params]) continue;
       if (k === 'model' && v !== 'lite' && v !== 'full') continue;
       if (k === 'clothing' && !CLOTHING_MODES.some((m) => m.id === v)) continue;
+      if (k === 'clothTexture' && !CLOTHING_TEXTURES.some((texture) => texture.id === v)) continue;
       if ((k === 'clothColor' || k === 'clothColor2') && !/^#[0-9a-f]{6}$/i.test(v as string)) continue;
+      if (k === 'textureStrength' || k === 'textureScale' || k === 'clothBrightness') {
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        const [min, max] = MATERIAL_LIMITS[k];
+        out[k] = Math.min(max, Math.max(min, v));
+        continue;
+      }
       out[k] = v;
     }
   }

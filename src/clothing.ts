@@ -1,6 +1,6 @@
 // 服の着せ替え: 人物セグメンテーションで服の領域を求め、色や柄を塗り替える
 //
-// 塗り替えは服全体に対して行い、元の服の明暗（しわ・縫い目・プリント）を残して色だけを載せる。
+// 単色は均一な基本色に素材・陰影を加え、柄モードは元の服の明暗（しわ・縫い目・プリント）も残す。
 // 実際の塗り替えは renderer.ts のフラグメントシェーダで行う。
 
 import { ImageSegmenter, type FilesetResolver } from '@mediapipe/tasks-vision';
@@ -10,7 +10,7 @@ type WasmFileset = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>;
 /** 柄の一覧。並び順がシェーダの柄番号になる（0 = OFF） */
 export const CLOTHING_MODES = [
   { id: 'off', label: 'OFF' },
-  { id: 'solid', label: '無地' },
+  { id: 'solid', label: '単色' },
   { id: 'border', label: 'ボーダー' },
   { id: 'stripe', label: 'ストライプ' },
   { id: 'gingham', label: 'ギンガムチェック' },
@@ -21,8 +21,31 @@ export const CLOTHING_MODES = [
 
 export type ClothingMode = (typeof CLOTHING_MODES)[number]['id'];
 
+/** 元映像の布目とは別に生成する、衣服の素材。並び順がシェーダの素材番号になる。 */
+export const CLOTHING_TEXTURES = [
+  { id: 'none', label: 'なし' },
+  { id: 'weave', label: '織り布' },
+  { id: 'knit', label: 'ニット' },
+] as const;
+
+export type ClothingTexture = (typeof CLOTHING_TEXTURES)[number]['id'];
+
+/** 衣服の基本色を変える肌色のプリセット。単色モードで描画する。 */
+export const SKIN_TONE_PRESETS = [
+  { label: 'ライト', color: '#f2d6c4' },
+  { label: 'ピーチ', color: '#e9bca6' },
+  { label: 'ベージュ', color: '#d5ad8c' },
+  { label: 'タン', color: '#bd8a66' },
+  { label: 'ブラウン', color: '#956548' },
+  { label: 'ダーク', color: '#634432' },
+] as const;
+
 export function clothingModeIndex(id: string): number {
   return Math.max(0, CLOTHING_MODES.findIndex((m) => m.id === id));
+}
+
+export function clothingTextureIndex(id: string): number {
+  return Math.max(0, CLOTHING_TEXTURES.findIndex((texture) => texture.id === id));
 }
 
 /** '#rrggbb' をリニアの RGB にする */

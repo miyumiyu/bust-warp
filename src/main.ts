@@ -1,6 +1,6 @@
 import { FilesetResolver, PoseLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { listCameras, openCamera } from './camera';
-import { clothingModeIndex, ClothingSegmenter, hexToLinear } from './clothing';
+import { clothingModeIndex, clothingTextureIndex, ClothingSegmenter, hexToLinear } from './clothing';
 import { computeChestPose, type BodyState, type ChestPose, type HandState, type Vec } from './chest';
 import { Overlay } from './overlay';
 import { loadParams, OBS_MODE, obsUrl, type Params } from './params';
@@ -36,6 +36,8 @@ const HAND_FADE_IN = 12;
 const HAND_FADE_OUT = 6;
 /** 柄の大きさ 1 のときの 1 周期の長さ（×肩幅） */
 const PATTERN_PERIOD = 0.14;
+/** 布目の大きさ 1 のときの周期（×肩幅）。柄の大きさとは別に調整する。 */
+const FABRIC_PERIOD = 0.018;
 
 interface TouchHand extends HandState {
   weight: number;
@@ -333,6 +335,10 @@ function dressUp(now: number): ClothingRender | null {
     reference: clothing.reference,
     frame,
     unit,
+    texture: clothingTextureIndex(params.clothTexture),
+    textureStrength: params.textureStrength,
+    textureUnit: FABRIC_PERIOD * (lastPose?.width ?? 0.5) * params.textureScale,
+    brightness: params.clothBrightness,
   };
 }
 

@@ -1,5 +1,5 @@
 import type { CameraInfo } from './camera';
-import { CLOTHING_MODES, type ClothingMode } from './clothing';
+import { CLOTHING_MODES, CLOTHING_TEXTURES, SKIN_TONE_PRESETS } from './clothing';
 import { DEFAULTS, saveParams, type Params } from './params';
 
 type NumKey = { [K in keyof Params]: Params[K] extends number ? K : never }[keyof Params];
@@ -20,11 +20,15 @@ interface Toggle {
   hotkey?: string;
 }
 
-interface Choice {
-  key: 'clothing';
+type ChoiceKey = 'clothing' | 'clothTexture';
+
+interface ChoiceDefinition<K extends ChoiceKey> {
+  key: K;
   label: string;
-  options: readonly { id: ClothingMode; label: string }[];
+  options: readonly { id: Params[K]; label: string }[];
 }
+
+type Choice = { [K in ChoiceKey]: ChoiceDefinition<K> }[ChoiceKey];
 
 interface ColorPick {
   key: 'clothColor' | 'clothColor2';
@@ -61,6 +65,15 @@ const SECTIONS: { title: string; items: Item[] }[] = [
       { key: 'clothColor', label: 'メインの色', color: true },
       { key: 'clothColor2', label: 'サブの色（柄）', color: true },
       { key: 'patternScale', label: '柄の大きさ', min: 0.4, max: 2.5, step: 0.05 },
+    ],
+  },
+  {
+    title: '服の質感・明るさ',
+    items: [
+      { key: 'clothTexture', label: 'テクスチャ', options: CLOTHING_TEXTURES },
+      { key: 'textureStrength', label: '質感の強さ', min: 0, max: 1, step: 0.01 },
+      { key: 'textureScale', label: '質感の大きさ', min: 0.4, max: 3, step: 0.05 },
+      { key: 'clothBrightness', label: '服の明るさ', min: 0.25, max: 2, step: 0.05 },
     ],
   },
   {
@@ -125,8 +138,16 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
   const hotkeys = new Map<string, BoolKey>();
 
   const commit = (key: keyof Params) => {
+    for (const refresh of refreshers) refresh();
     saveParams(params);
     actions.onChange(key);
+  };
+
+  const setChoice = <K extends ChoiceKey>(item: ChoiceDefinition<K>, value: string) => {
+    const selected = item.options.find((option) => option.id === value);
+    if (!selected) return;
+    params[item.key] = selected.id;
+    commit(item.key);
   };
 
   const h = (tag: string, cls?: string, text?: string) => {
@@ -142,6 +163,40 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
   for (const section of SECTIONS) {
     const sec = h('section');
     sec.append(h('h2', undefined, section.title));
+    if (section.title === '服の着せ替え') {
+      sec.append(h('p', 'preset-label', '肌色プリセット'));
+      const presets = h('div', 'skin-tone-presets');
+      presets.setAttribute('role', 'group');
+      presets.setAttribute('aria-label', '肌色プリセット');
+      for (const preset of SKIN_TONE_PRESETS) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'skin-tone-preset';
+        button.setAttribute('aria-label', `服を肌色にする：${preset.label}`);
+        const swatch = h('span', 'skin-tone-swatch');
+        swatch.style.backgroundColor = preset.color;
+        swatch.setAttribute('aria-hidden', 'true');
+        button.append(swatch, h('span', undefined, preset.label));
+        const refresh = () => {
+          const selected = params.clothing === 'solid' && params.clothColor.toLowerCase() === preset.color;
+          button.setAttribute('aria-pressed', String(selected));
+        };
+        button.addEventListener('click', () => {
+          // 先に両方の設定を更新してから通知し、OFF からでも領域推定を開始する。
+          params.clothing = 'solid';
+          params.clothColor = preset.color;
+          commit('clothing');
+          actions.onChange('clothColor');
+        });
+        refresh();
+        refreshers.push(refresh);
+        presets.append(button);
+      }
+      sec.append(presets, h('p', 'note preset-note', '色を押すと服全体と膨らみ部分の基本色を変更します。単色では元の布目やしわの濃淡を引き継ぎません。質感と陰影の設定は保持します。'));
+    }
+    if (section.title === '服の質感・明るさ') {
+      sec.append(h('p', 'note', '着せ替えた服に新しい布の質感を加えます。明るさと「陰影」の光の向き・強さ・ツヤは手動で調整できます。'));
+    }
     for (const item of section.items) {
       if ('min' in item) {
         const row = h('label', 'slider');
@@ -177,8 +232,7 @@ export function buildPanel(root: HTMLElement, params: Params, actions: PanelActi
         }
         const refresh = () => (select.value = params[item.key]);
         select.addEventListener('change', () => {
-          params[item.key] = select.value as ClothingMode;
-          commit(item.key);
+          setChoice(item, select.value);
         });
         refresh();
         refreshers.push(refresh);

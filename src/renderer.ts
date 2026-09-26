@@ -19,6 +19,12 @@ export interface ClothingRender {
   frame: [number, number, number, number];
   /** 柄の 1 周期の長さ */
   unit: number;
+  /** clothing.ts の CLOTHING_TEXTURES の番号（0 = なし） */
+  texture: number;
+  textureStrength: number;
+  /** 布目の 1 周期の長さ（柄の大きさとは独立） */
+  textureUnit: number;
+  brightness: number;
 }
 
 const VERT = `#version 300 es
@@ -53,12 +59,14 @@ uniform int u_handCount;
 uniform vec4 u_hands[${MAX_HANDS}]; // x, y, inner, outer
 uniform vec2 u_handWeight;
 uniform sampler2D u_clothMask;  // 服らしさ（元の映像の座標）
-uniform int u_clothMode;        // 0 = OFF, 1 = 無地, 2〜 = 柄（clothing.ts の CLOTHING_MODES の順）
+uniform int u_clothMode;        // 0 = OFF, 1 = 単色, 2〜 = 柄（clothing.ts の CLOTHING_MODES の順）
 uniform vec3 u_cloth1;          // メインの色（リニア）
 uniform vec3 u_cloth2;          // サブの色（リニア）
 uniform float u_clothRef;       // 服の平均の明るさ（リニア）
 uniform vec4 u_bodyFrame;       // 柄の原点 x, y と横軸 ux, uy（(-uy, ux) が下向き）
 uniform float u_patternUnit;    // 柄の 1 周期の長さ（アスペクト補正済み空間）
+uniform int u_clothTexture;     // 0 = なし, 1 = 織り布, 2 = ニット
+uniform vec3 u_clothSurface;    // 布目の強さ、周期、明るさ
 out vec4 outColor;
 
 // ---- 服の着せ替え ----
@@ -109,27 +117,56 @@ float patternAmount(vec2 q) {
 }
 
 vec3 toLinear(vec3 c) {
-  return pow(c, vec3(2.2));
+  return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
 }
 
 vec3 toSrgb(vec3 c) {
-  return pow(max(c, 0.0), vec3(1.0 / 2.2));
+  c = max(c, 0.0);
+  return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
 }
 
-// 服の部分に色や柄を載せる。元の服の明るさを平均との比で残し、しわ・縫い目・プリントの濃淡を保つ
+float clothingMask() {
+  // 推定した服の境目はやや内側に寄るので、少し外側まで塗る。
+  return smoothstep(0.12, 0.45, texture(u_clothMask, v_uv).r);
+}
+
+vec2 bodyCoords() {
+  vec2 s = vec2(v_uv.x * u_aspect, v_uv.y) - u_bodyFrame.xy;
+  return vec2(dot(s, u_bodyFrame.zw), dot(s, vec2(-u_bodyFrame.w, u_bodyFrame.z)));
+}
+
+// 身体に固定した手続き的な布目。画素より細かい模様を減衰してちらつきを抑える。
+float fabricShade(vec2 local) {
+  if (u_clothTexture == 0 || u_clothSurface.x <= 0.0) return 1.0;
+  const float TAU = 6.28318530718;
+  vec2 q = local / max(u_clothSurface.y, 0.0001);
+  if (u_clothTexture == 2) {
+    // 糸が左右に回り込むニットの編み目。
+    q.y *= 0.6;
+    q.x += 0.28 * cos(TAU * q.y);
+  }
+  vec2 visible = 1.0 - smoothstep(vec2(0.25), vec2(0.8), fwidth(q));
+  vec2 yarn = cos(TAU * q) * visible;
+  float detail = dot(yarn, u_clothTexture == 2 ? vec2(0.8, 0.2) : vec2(0.55, 0.45));
+  return 1.0 + 0.28 * u_clothSurface.x * detail;
+}
+
+// 単色は元の服の濃淡を使わず、選択した布目・明るさだけを載せる。
+// 柄モードは従来どおり元のしわ・縫い目・プリントの濃淡も保つ。
 vec3 dressUp(vec3 c) {
   if (u_clothMode == 0) return c;
-  // 推定した服の境目はやや内側に寄っていて、元の服の色が縁に細く残るので、少し外側まで塗る
-  float m = smoothstep(0.12, 0.45, texture(u_clothMask, v_uv).r);
+  float m = clothingMask();
   if (m <= 0.0) return c;
-  vec3 lin = toLinear(c);
-  float lum = dot(lin, vec3(0.2126, 0.7152, 0.0722));
-  // 暗い服のノイズを増幅しすぎないよう、小さな値を足してから比を取り、少し圧縮する
-  float shade = clamp(pow((lum + 0.02) / (u_clothRef + 0.02), 0.8), 0.0, 2.5);
-  vec2 s = vec2(v_uv.x * u_aspect, v_uv.y) - u_bodyFrame.xy;
-  vec2 q = vec2(dot(s, u_bodyFrame.zw), dot(s, vec2(-u_bodyFrame.w, u_bodyFrame.z))) / u_patternUnit;
+  float shade = 1.0;
+  if (u_clothMode != 1) {
+    float lum = dot(toLinear(c), vec3(0.2126, 0.7152, 0.0722));
+    // 暗い服のノイズを増幅しすぎないよう、基準との比を少し圧縮する。
+    shade = clamp(pow((lum + 0.02) / (u_clothRef + 0.02), 0.8), 0.0, 2.5);
+  }
+  vec2 local = bodyCoords();
+  vec2 q = local / max(u_patternUnit, 0.0001);
   vec3 target = mix(u_cloth1, u_cloth2, patternAmount(q));
-  return mix(c, toSrgb(target * shade), m);
+  return mix(c, toSrgb(target * shade * fabricShade(local) * u_clothSurface.z), m);
 }
 
 // ---- 陰影 ----
@@ -253,7 +290,9 @@ export class Renderer {
     | 'cloth2'
     | 'clothRef'
     | 'bodyFrame'
-    | 'patternUnit',
+    | 'patternUnit'
+    | 'clothTexture'
+    | 'clothSurface',
     WebGLUniformLocation
   >;
   private readonly maskTex: WebGLTexture;
@@ -301,6 +340,8 @@ export class Renderer {
       clothRef: loc('u_clothRef'),
       bodyFrame: loc('u_bodyFrame'),
       patternUnit: loc('u_patternUnit'),
+      clothTexture: loc('u_clothTexture'),
+      clothSurface: loc('u_clothSurface'),
     };
 
     const vao = gl.createVertexArray();
@@ -404,6 +445,8 @@ export class Renderer {
     gl.uniform1f(u.clothRef, c.reference);
     gl.uniform4fv(u.bodyFrame, c.frame);
     gl.uniform1f(u.patternUnit, c.unit);
+    gl.uniform1i(u.clothTexture, c.texture);
+    gl.uniform3f(u.clothSurface, c.textureStrength, c.textureUnit, c.brightness);
   }
 
   private setLighting(l: Lighting | null): void {
